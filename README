@@ -1,0 +1,135 @@
+DeathStation 9000 file system
+
+Work in progress!
+
+Goals of this project:
+
+  * Simulate crashes with partial writes of user data at sector level
+  * Simulate crashes with lost directory entry changes [NOT WORKING YET]
+  * Produce human readable data, for some value of human
+  * Produce reproducible results
+  * Support automated testing of database recovery-like projects
+
+To build, you'll need:
+
+  Debian:  apt install libfuse-dev g++ make
+  FreeBSD: pkg install fusefs-libs
+  macOS:   ...might work with "osxfuse"?
+
+To run, you'll need:
+
+  Debian:  nothing?  (other distros require group membership)
+  FreeBSD: kldload fusefs (or fusefs_enabled="YES" in /etc/rc.conf)
+           sysctl vfs.usermount=1
+
+Recording an I/O workload:
+
+  $ mkdir my_mount_point
+  $ mkdir underlying_dir
+  $ dsfs_record my_mount_point underlying_dir dsfs.log
+  ... run some workload inside my_mount_point ...
+  $ umount my_mount_point
+
+  This should work normally (but slowly), assuming enough operations are
+  supported for the given workload.  The result should be a big file called
+  dsfs.log that contains lines like:
+
+  (create "/pgdata/PG_VERSION" 514 33152 5)
+  (write "/pgdata/PG_VERSION" "14\n" 0 5)
+  (release 5)
+
+  As well as being logged, most data-writing operations performed in
+  my_mount_point are remapped into underlying_dir, a regular directory running
+  in your usual file system.
+
+Replaying an I/O workload:
+
+  $ mkdir replayed_fs
+  $ dsfs_replay my_replayed_fs < dsfs.log
+
+  This should replay the contents of dsfs.log, so that my_replayed_fs contains
+  files that are identical to those in underlying_dir.  So far this is just a
+  really inefficient way to copy a directory.
+
+Replaying up to a point in time:
+
+  $ rm -fr replayed_fs
+  $ mkdir replayed_fs
+  $ dsfs_replay my_replayed_fs dsfs.log --stop-before-fsync 5
+
+  This replays the log right up to the moment before the 5th fsync.  Use
+  something like grep '^(:fsync' | wc -l to find out how many of those there
+  are.
+
+  That's a fairly arbitrary stop point, and various other operations can be
+  used as stop points as well (see dsfs_replay --help for the full list).
+
+  This implies --write-back=all, which simulates a system that opened
+  all files in direct mode, where all writes were atomic and complete, and
+  then crashed.  This might be useful for studying some kinds of crash recovery
+  problems.
+
+Replaying with torn writes:
+
+  $ dsfs_replay my_replayed_fs dsfs.log
+                --stop-before-fsync 5 --sector=512 --write-back=odd
+
+  This replays the log up up to the 5th fsync, but only writes out every second
+  sector immediately, and writes the rest out when fsync completes.  See
+  dsfs_replay --help for more options for controlling write atomicity and
+  buffering.
+
+Replaying with directory entry amnesia:
+
+  $ dsfs_replay my_replayed_fs dsfs.log
+                --stop-before-unlink 5
+                --directory-write-back=random
+
+  This replays the log up to the selected point as before, but this time it
+  delays the writing of directory entries by flipping a coin.  The effects
+  of all directory changes due to create, link, unlink, rename, mkdir and rmdir
+  operations are not persisted until the parent directory is fsynced.
+
+Labelling points in time:
+
+  While recording, you can create special sentinel files in the file system to
+  use as timing signals, that can act as a type of simple checkpointing system
+  allowing a small range of a log to be replayed multiple times.  Example:
+
+  $ touch my_mount_point/my_stop_point_1
+  ... do more things ...
+  $ touch my_mount_point/my_stop_point_2
+
+  Then you can use:
+
+  $ dsfs_replay my_snapshot dsfs.log --stop-after-create-path /my_stop_point_1
+
+  ... or if you've already done that, and then backed up that directory and
+  restored it, and now you want to replay what happened between the two stop
+  points:
+
+  $ dsfs_replay my_snapshot dsfs.log --start-after-create-path /my_stop_point_1
+                                     --stop-before-create-path /my_stop_point_2
+
+  It might be possible to construct automated tests that explore many points
+  in time using some of these tools.
+
+Bugs:
+
+  * dsfs_record provides a file system that works well enough to run
+    PostgreSQL's make installcheck on FreeBSD fuse, but for some reason it dies
+    (reads corrupted data?) on Linux.  FIXME!
+
+  * dsfs_replay directory handling is not working right yet... FIXME!
+
+Notes:
+
+  * Currently the recorder runs in non-threaded mode.  It's not clear how to do
+    a more concurrent version and stay sane.
+
+  * Page cache buffering and partial writes due to power loss are entirely
+    different phenomena at different levels of the storage stack, but this tool
+    doesn't attempt to model their failure modes separately; it generalises the
+    problem to barriers at which it is down that all data for a file is down on
+    disk, and tries to "spread the failure around" so that it's likely to break
+    something.

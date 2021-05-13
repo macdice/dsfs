@@ -1,0 +1,40 @@
+task:
+  name: FreeBSD
+  freebsd_instance:
+    image_family: freebsd-13-0
+  install_script:
+    - pkg install -y fusefs-libs
+  kernel_module_script:
+    - kldload fusefs
+    - sysctl vfs.usermount=1
+  build_script:
+    - make
+  test_script:
+    - make check
+
+task:
+  name: Linux
+  compute_engine_instance:
+    image_project: debian-cloud
+    image: family/debian-10
+    platform: linux
+  install_script:
+    - apt-get --yes update
+    - DEBIAN_FRONTEND=noninteractive apt-get --yes install libfuse-dev g++ make
+  build_script:
+    - make
+  test_script:
+    - make check
+
+## brew installation seems to fail
+#
+#task:
+#  name: macOS
+#  osx_instance:
+#    image: catalina-base
+#  install_script:
+#    - brew cask install osxfuse
+#  build_script:
+#    - make
+#  test_script:
+#    - make check
